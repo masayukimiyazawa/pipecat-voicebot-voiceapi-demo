@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi import FastAPI, HTTPException, Request, WebSocket, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -86,6 +86,51 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+@app.get("/voice/webhook")
+async def voice_webhook(request: Request) -> JSONResponse:
+    """
+    Handles inbound Vonage Voice API calls.
+    Returns an NCCO to connect the call to the WebSocket endpoint.
+    Vonage sends a GET request with call parameters as query strings.
+    """
+    # Log incoming call information from query parameters
+    query_params = dict(request.query_params)
+    logger.info(f"Received Voice Webhook (GET). Call info: {query_params}")
+    
+    # Determine the WebSocket URI for the bot
+    # We use the host from the request to construct the correct absolute WebSocket URI
+    host = request.headers.get("host", "localhost:8005")
+    scheme = "wss" if not host.startswith("localhost") else "ws"
+    ws_uri = f"{scheme}://{host}/ws"
+    
+    logger.info(f"Connecting call to bot at: {ws_uri}")
+
+    # Construct NCCO to connect the call to the WebSocket
+    # Explicitly specify content-type for reliable bidirectional audio
+    ncco = [
+        {
+            "action": "connect",
+            "endpoint": [
+                {
+                    "type": "websocket",
+                    "uri": ws_uri,
+                    "content-type": "audio/l16;rate=16000"
+                }
+            ]
+        }
+    ]
+
+    return JSONResponse(content=ncco)
+
+
+@app.post("/voice/webhook")
+async def voice_webhook_post(request: Request) -> JSONResponse:
+    """
+    Alternative endpoint for POST requests (if needed).
+    """
+    return await voice_webhook(request)
+
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 

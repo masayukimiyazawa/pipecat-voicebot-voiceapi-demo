@@ -5,12 +5,11 @@ from loguru import logger
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
-from pipecat.frames.frames import TextFrame
+from pipecat.frames.frames import Frame, InputAudioRawFrame, TextFrame
 from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.frame_processor import FrameDirection
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMAssistantAggregator,
     LLMContextAggregatorPair,
@@ -30,6 +29,13 @@ from pipecat.transports.websocket.fastapi import (
 from pipecat.workers.runner import WorkerRunner
 
 load_dotenv(override=True)
+
+class AudioFrameLogger(FrameProcessor):
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, InputAudioRawFrame):
+            logger.debug(f"AudioFrameLogger: received {len(frame.audio)} bytes @ {frame.sample_rate}Hz")
+        await self.push_frame(frame, direction)
 
 # Monkey-patch LLMAssistantAggregator to forward TextFrames downstream to TTS.
 # Pipecat 1.4.0's _handle_text absorbs text for context but does not push
@@ -76,20 +82,23 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool, sample_rate: in
         user_params=LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(
                 params=VADParams(
-                    confidence=0.7,
-                    start_secs=0.3,
-                    stop_secs=0.8,
-                    min_volume=0.4,
+                    confidence=0.5,
+                    start_secs=0.2,
+                    stop_secs=0.2,
+                    min_volume=0.0,
                 ),
             ),
-            audio_idle_timeout=2.0,
+            audio_idle_timeout=1.0,
             user_turn_stop_timeout=5.0,
         ),
     )
 
+    audio_logger = AudioFrameLogger()
+
     pipeline = Pipeline(
         [
             transport.input(),
+            audio_logger,
             stt,
             user_aggregator,
             llm,
@@ -112,7 +121,10 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool, sample_rate: in
     @transport.event_handler("on_client_connected")
     async def on_client_connected(_transport, _client):
         logger.info("Client connected. Starting conversation...")
-        await worker.queue_frames([LLMRunFrame()])
+        # Send a greeting message directly to TTS instead of LLMRunFrame
+        # This avoids the "No user query found in messages" error
+        greeting = "こんにちは。音声アシスタントです。何かお手伝いできますか？"
+        await worker.queue_frames([TextFrame(greeting)])
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(_transport, _client):
@@ -125,7 +137,10 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool, sample_rate: in
 
 
 async def bot(runner_args: WebSocketRunnerArguments):
+    # Default to 16000 if not specified, but allow override from environment
     sample_rate = int(os.getenv("VONAGE_AUDIO_RATE", "16000"))
+    
+    logger.info(f"Starting bot with sample rate: {sample_rate}")
 
     serializer = VonageFrameSerializer(
         VonageFrameSerializer.InputParams(
@@ -144,3 +159,4 @@ async def bot(runner_args: WebSocketRunnerArguments):
     )
 
     await run_bot(transport, runner_args.handle_sigint, sample_rate)
+

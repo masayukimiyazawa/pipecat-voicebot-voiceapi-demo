@@ -1,22 +1,108 @@
 # Pipecat Voice Bot — LM Studio + pyopenjtalk + Vonage
 
-Voice conversation bot powered by LM Studio (local LLM/STT) and pyopenjtalk (local Japanese TTS). The frontend uses the Vonage Video JS SDK to connect to a Vonage Video session, and the Audio Connector bridges audio to the bot's Pipecat pipeline.
+Voice conversation bot powered by LM Studio (local LLM/STT) and pyopenjtalk (local Japanese TTS). The bot supports both **Video Sessions** (via Browser SDK) and **Phone Calls** (via PSTN/Vonage Voice API).
 
 ## Architecture
 
 ```
-Browser (Vonage Video JS SDK)
-    │ publish / subscribe
-    ▼
-Vonage Cloud
-    │ Audio Connector (raw PCM16 WebSocket)
-    ▼
-Cloudflare Tunnel ───→ localhost:8005/ws
-                            │
-                       FastAPI + Pipecat
-                       Pipeline: STT → LLM → TTS
-                            │
-                   LM Studio (:1234)    pyopenjtalk (local)
+                    ┌─────────────────────────────────────┐
+                    │        Cloudflare Tunnel            │
+                    │     (WebSocket + HTTP/HTTPS)        │
+                    │         trycloudflare.com           │
+                    └──────────┬──────────────────────────┘
+                               │
+                    localhost:8005
+                               │
+                    ┌──────────▼──────────────────────────┐
+                    │  FastAPI + Pipecat                   │
+                    │  Pipeline: STT → LLM → TTS          │
+                    │  ┌────────────────────────────────┐  │
+                    │  │  LM Studio (:1234)             │  │
+                    │  │  ├── LLM (gemma/llama etc)     │  │
+                    │  │  └── Whisper (STT)             │  │
+                    │  │  pyopenjtalk (TTS)             │  │
+                    │  └────────────────────────────────┘  │
+                    └──────────────────────────────────────┘
+```
+
+### Video Mode (Browser → Video Session → Audio Connector)
+
+```
+1. Browser                2. POST /demo/connect         3. Create Session
+   ┌──────┐   ──────►   ┌──────────┐   ──────►   ┌──────────────┐
+   │Client│               │FastAPI   │               │Vonage Cloud  │
+   └──────┘               └──────────┘               │(Video API)   │
+       ▲                                              └──────┬───────┘
+       │                                                     │
+       │  5. Join session (OT.initSession)                   │
+       │     + publish/subscribe audio                       │ 4. Start Audio
+       └─────────────────────────────────────────────────────┘    Connector
+                                                                    │
+                                                            ┌───────▼───────┐
+                                                            │  WebSocket   │
+                                                            │  /ws          │
+                                                            └───────┬───────┘
+                                                                    │
+                                                            ┌───────▼───────┐
+                                                            │  Pipecat Bot  │
+                                                            │  STT→LLM→TTS  │
+                                                            └───────────────┘
+
+1. User opens the tunnel URL in a browser (static/index.html).
+2. User clicks "接続" → browser sends POST /demo/connect to the server.
+3. Server creates a Vonage Video session via vng.video.create_session().
+4. Server starts an Audio Connector via vng.video.start_audio_connector(),
+   pointing it to wss://<tunnel-url>/ws (the bot's WebSocket endpoint).
+5. Browser joins the session via OT.initSession(applicationId, sessionId)
+   and session.connect(token), then publishes microphone audio and
+   subscribes to the bot's audio stream.
+6. Audio flows: Browser ↔ Vonage Cloud ↔ Audio Connector ↔ Bot.
+```
+
+### Voice Mode (Phone Call → Voice API → Webhook/NCCO)
+
+```
+1. Inbound Call           2. GET /voice/webhook         3. Return NCCO
+   ┌──────┐   ──────►   ┌──────────┐   ──────►   ┌──────────────┐
+   │Phone  │               │FastAPI   │               │Vonage Voice  │
+   └──────┘               └──────────┘               │Platform      │
+       ▲                                              └──────┬───────┘
+       │                                                     │
+       │  5. Call bridged to WebSocket                       │ 4. Connect to
+       └─────────────────────────────────────────────────────┘    WebSocket
+                                                                    │
+                                                            ┌───────▼───────┐
+                                                            │  WebSocket   │
+                                                            │  /ws          │
+                                                            └───────┬───────┘
+                                                                    │
+                                                            ┌───────▼───────┐
+                                                            │  Pipecat Bot  │
+                                                            │  STT→LLM→TTS  │
+                                                            └───────────────┘
+
+1. A user calls your Vonage phone number.
+2. Vonage sends a GET request to the configured Answer URL
+   (https://<tunnel-url>/voice/webhook) with call metadata in
+   query parameters (to, from, conversation_uuid, etc.).
+3. Server returns an NCCO (Nexmo Call Control Object) instructing
+   Vonage to connect the call to the bot via WebSocket:
+   [
+     {
+       "action": "connect",
+       "endpoint": [
+         {
+           "type": "websocket",
+           "uri": "wss://<tunnel-url>/ws"
+         }
+       ]
+     }
+   ]
+4. Vonage establishes a WebSocket connection to the provided URI.
+5. The call is now bridged: audio flows bidirectionally between
+   the phone and the Pipecat pipeline.
+6. On connect, the bot sends a greeting ("こんにちは...") via TTS.
+7. Subsequent user speech follows: STT → LLM → TTS → phone.
 ```
 
 ## Prerequisites
@@ -40,9 +126,10 @@ Edit `.env`:
 |----------|---------|-------------|
 | `LM_STUDIO_BASE_URL` | `http://localhost:1234/v1` | LM Studio API endpoint |
 | `STT_LANGUAGE` | `ja` | Whisper language code |
-| `VONAGE_APPLICATION_ID` | `abcd1234-...` | Vonage Video Application ID (required) |
+| `VONAGE_APPLICATION_ID` | `abcd1234-...` | Vonage Application ID (required) |
 | `VONAGE_PRIVATE_KEY` | `-----BEGIN PRIVATE KEY-----...` | Vonage private key (path or inline, required) |
 | `WS_URI` | `wss://xxx.trycloudflare.com/ws` | Public WebSocket URL (auto-set by start.sh) |
+| `VONAGE_WEBHOOK_URL` | `https://xxx.trycloudflare.com/voice/webhook` | Vonage Voice API Answer URL (auto-set by start.sh) |
 
 ### 2. Install dependencies
 
@@ -64,13 +151,20 @@ bash start.sh
 
 This automatically:
 1. Starts a Cloudflare Tunnel (`cloudflared`) and captures the public URL
-2. Updates `WS_URI` in `.env`
+2. Updates `WS_URI` and `VONAGE_WEBHOOK_URL` in `.env`
 3. Restarts the Python server
-4. Prints the URL to open in your browser
+4. Prints the URLs and instructions
 
-### 5. Open browser
+### 5. Connect
 
-Go to the printed URL and click **接続** (Connect).
+#### For Video Mode:
+Open the printed URL in your browser and click **接続** (Connect).
+
+#### For Voice Mode:
+1. Copy the **Vonage Voice API Webhook URL** printed by `start.sh`.
+2. Go to [Vonage Dashboard](https://dashboard.nexmo.com/) > Voice > Applications > Your App.
+3. Set the **Answer URL** to the copied URL and save.
+4. Call your Vonage phone number.
 
 ## API Endpoints
 
@@ -78,30 +172,34 @@ Go to the printed URL and click **接続** (Connect).
 |----------|--------|-------------|
 | `/` | GET | Serves frontend (`static/index.html`) |
 | `/health` | GET | Health check |
-| `/ws` | WebSocket | Pipecat pipeline endpoint (consumed by Audio Connector) |
+| `/ws` | WebSocket | Pipecat pipeline endpoint (consumed by Audio Connector / Voice API) |
 | `/connect` | POST | Vonage Audio Connector (legacy, requires `WS_URI` env) |
-| `/demo/connect` | POST | One-shot demo: creates session + token + starts Audio Connector |
+| `/demo/connect` | POST | One-shot demo: creates session + token + starts Audio Connector (Video Mode) |
+| `/voice/webhook` | GET | Vonage Voice API Answer Webhook: returns NCCO to bridge call to `/ws` |
 
 ## Project Structure
 
 ```
-├── server.py                 # FastAPI server
+├── server.py                 # FastAPI server (HTTP + WebSocket)
 ├── bot.py                    # Pipecat pipeline definition
 ├── lm_studio_stt.py          # LM Studio STT service (JSON with base64 audio)
 ├── tts_piper_plus.py         # Piper-plus TTS wrapper (Ja/En)
 ├── pyproject.toml            # Dependencies
 ├── setup.sh                  # TTS voice model downloader
+├── start.sh                  # One-command startup script
 ├── .env                      # Credentials (git-ignored)
 ├── .env.example              # Template
 ├── static/
 │   └── index.html            # Frontend (Vonage Video JS SDK)
 └── docs/
-    ├── PLAN.md
-    └── PLAN.ja.md
+    ├── CHANGELOG.md
+    ├── PLAN_VoiceAPI_en.md
+    └── PLAN_VoiceAPI_jp.md
 ```
 
 ## Demo Flow
 
+### 1. Video Mode (Browser-based)
 1. User opens the tunnel URL in a browser
 2. Clicks **接続** → `POST /demo/connect` is called
 3. Server creates a Vonage Video session, generates a JWT token, and starts the Audio Connector (pointing to `wss://tunnel-url/ws`)
@@ -109,8 +207,13 @@ Go to the printed URL and click **接続** (Connect).
 5. Frontend publishes microphone audio and subscribes to the bot's audio stream
 6. Audio flows: Browser → Vonage Cloud → Audio Connector → Bot Pipeline → Audio Connector → Browser
 
+### 2. Voice Mode (Phone Call)
+1. Configure **Answer URL** in Vonage Dashboard to `https://<tunnel-url>/voice/webhook`
+2. A user calls your Vonage number
+3. Vonage sends a webhook to `/voice/webhook`, which returns an NCCO
+4. The call is bridged to the bot via WebSocket (`/ws`)
+5. Audio flows: Phone → Vonage Voice Platform → WebSocket → Bot Pipeline → WebSocket → Phone
+
 ## Sequencing
 
-The bot initiates conversation on client connection by queueing an `LLMRunFrame`. No wake word required.
-# pipecat-vonage-video-api-bot-demo-JP
-# pipecat-vonage-video-api-bot-demo-JP
+The bot initiates conversation on client connection by sending a text greeting via the TTS engine. No wake word required.

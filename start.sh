@@ -37,7 +37,7 @@ fi
 
 echo "Tunnel URL: $TUNNEL_URL"
 
-# Update .env
+# Update .env with WebSocket URI
 WS_URI="wss://${TUNNEL_URL#https://}/ws"
 if grep -q "^WS_URI=" "$ENV_FILE"; then
     sed -i '' "s|^WS_URI=.*|WS_URI=$WS_URI|" "$ENV_FILE"
@@ -46,10 +46,19 @@ else
 fi
 echo "Updated .env: WS_URI=$WS_URI"
 
+# Update .env with Vonage Voice API Webhook URL
+VONAGE_WEBHOOK_URL="${TUNNEL_URL}/voice/webhook"
+if grep -q "^VONAGE_WEBHOOK_URL=" "$ENV_FILE"; then
+    sed -i '' "s|^VONAGE_WEBHOOK_URL=.*|VONAGE_WEBHOOK_URL=$VONAGE_WEBHOOK_URL|" "$ENV_FILE"
+else
+    echo "VONAGE_WEBHOOK_URL=$VONAGE_WEBHOOK_URL" >> "$ENV_FILE"
+fi
+echo "Updated .env: VONAGE_WEBHOOK_URL=$VONAGE_WEBHOOK_URL"
+
 # Restart server
 echo "=== Restarting server ==="
-# Kill anything listening on 8005
-fuser -k 8005/tcp || lsof -ti:8005 | xargs kill -9 2>/dev/null || true
+# Kill anything listening on 8005 (macOS compatible)
+lsof -ti:8005 | xargs kill -9 2>/dev/null || true
 sleep 2
 
 cd "$SCRIPT_DIR" && nohup .venv/bin/python3 server.py > /tmp/server.log 2>&1 &
@@ -65,4 +74,10 @@ else
 fi
 
 echo "=== Done ==="
+echo ""
 echo "Open https://${TUNNEL_URL#https://} in your browser"
+echo ""
+echo "Vonage Voice API Webhook URL:"
+echo "$VONAGE_WEBHOOK_URL"
+echo ""
+echo "Set this URL in Vonage Dashboard > Voice > Applications > Your App > Answer URL"
