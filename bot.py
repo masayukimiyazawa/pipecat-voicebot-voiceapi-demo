@@ -1,5 +1,7 @@
+import asyncio
 import os
 
+import numpy as np
 from dotenv import load_dotenv
 from loguru import logger
 
@@ -19,6 +21,7 @@ from pipecat.runner.types import WebSocketRunnerArguments
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.whisper.stt import WhisperSTTServiceMLX, MLXModel
 from pipecat.transcriptions.language import Language
+from pipecat.services.settings import assert_given
 from tts_piper_plus import PiperPlusTTSService
 from pipecat.serializers.vonage import VonageFrameSerializer
 from pipecat.transports.base_transport import BaseTransport
@@ -52,9 +55,17 @@ LM_STUDIO_BASE_URL = os.getenv("LM_STUDIO_BASE_URL", "http://localhost:1234/v1")
 LM_MODEL = os.getenv("LM_MODEL", "")
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ja")
 
+_llm_instance = None
+_stt_instance = None
+_tts_instance = None
 
-async def run_bot(transport: BaseTransport, handle_sigint: bool, sample_rate: int):
-    llm = OpenAILLMService(
+
+async def preload_models():
+    global _llm_instance, _stt_instance, _tts_instance
+    
+    logger.info("Pre-loading models (this may take a minute)...")
+    
+    _llm_instance = OpenAILLMService(
         base_url=LM_STUDIO_BASE_URL,
         api_key="not-needed",
         settings=OpenAILLMService.Settings(
@@ -68,7 +79,7 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool, sample_rate: in
         ),
     )
 
-    stt = WhisperSTTServiceMLX(
+    _stt_instance = WhisperSTTServiceMLX(
         settings=WhisperSTTServiceMLX.Settings(
             model=MLXModel.LARGE_V3_TURBO_Q4,
             language=Language(STT_LANGUAGE),
@@ -76,7 +87,74 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool, sample_rate: in
         ),
     )
 
-    tts = PiperPlusTTSService()
+    _tts_instance = PiperPlusTTSService()
+
+    # Force VAD model loading
+    logger.info("Loading VAD model...")
+    vad = SileroVADAnalyzer(
+        params=VADParams(
+            confidence=0.5,
+            start_secs=0.2,
+            stop_secs=0.2,
+            min_volume=0.0,
+        ),
+    )
+    del vad
+    
+    # Force Smart Turn model loading
+    logger.info("Loading turn detection model...")
+    from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
+    turn = LocalSmartTurnAnalyzerV3()
+    del turn
+    
+    # Force Whisper model loading by triggering import and first transcribe
+    logger.info("Loading Whisper STT model...")
+    
+    # Force mlx_whisper import and model loading with dummy audio
+    dummy_audio = bytes(32000)  # 1 second of silence at 16kHz
+    try:
+        import mlx_whisper
+        model_path = assert_given(_stt_instance._settings.model) if _stt_instance else None
+        if model_path:
+            # Transcribe dummy audio to force model loading
+            audio_float = np.frombuffer(dummy_audio, dtype=np.int16).astype(np.float32) / 32768.0
+            mlx_whisper.transcribe(
+                audio_float,
+                path_or_hf_repo=model_path,
+                language="ja",
+            )
+            logger.info("Whisper model loaded successfully")
+    except Exception as e:
+        logger.debug(f"Model loading (may fail if model path not set): {e}")
+    
+    # Give time for models to load
+    await asyncio.sleep(5)
+    
+    logger.info("All models pre-loaded successfully")
+
+
+def get_llm():
+    if _llm_instance is None:
+        raise RuntimeError("Models not pre-loaded. Call preload_models() first.")
+    return _llm_instance
+
+
+def get_stt():
+    if _stt_instance is None:
+        raise RuntimeError("Models not pre-loaded. Call preload_models() first.")
+    return _stt_instance
+
+
+def get_tts():
+    if _tts_instance is None:
+        raise RuntimeError("Models not pre-loaded. Call preload_models() first.")
+    return _tts_instance
+
+
+async def run_bot(transport: BaseTransport, handle_sigint: bool, sample_rate: int):
+    llm = get_llm()
+    stt = get_stt()
+    tts = get_tts()
 
     context = LLMContext()
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(

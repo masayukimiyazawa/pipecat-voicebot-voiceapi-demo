@@ -82,6 +82,11 @@ async def _connect_audio_connector_async(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from bot import preload_models
+    
+    logger.info("Server starting up...")
+    await preload_models()
+    logger.info("Server ready to accept calls")
     yield
 
 
@@ -222,6 +227,16 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     logger.info("Client connected to /ws")
 
+    async def keepalive():
+        while True:
+            try:
+                await websocket.send_text('{"event":"keepalive"}')
+                await asyncio.sleep(10)
+            except Exception:
+                break
+
+    keepalive_task = asyncio.create_task(keepalive())
+
     try:
         from bot import bot
         from pipecat.runner.types import WebSocketRunnerArguments
@@ -234,6 +249,8 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.close()
         except Exception:
             pass
+    finally:
+        keepalive_task.cancel()
 
 
 if __name__ == "__main__":
