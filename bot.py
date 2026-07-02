@@ -57,8 +57,8 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool, sample_rate: in
     llm = OpenAILLMService(
         base_url=LM_STUDIO_BASE_URL,
         api_key="not-needed",
-        model=LM_MODEL,
         settings=OpenAILLMService.Settings(
+            model=LM_MODEL,
             system_instruction=(
                 "あなたは音声アシスタントです。"
                 "応答はテキスト読み上げで読まれるため、簡潔で会話調にしてください。"
@@ -69,9 +69,11 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool, sample_rate: in
     )
 
     stt = WhisperSTTServiceMLX(
-        model=MLXModel.LARGE_V3_TURBO_Q4,
-        language=Language(STT_LANGUAGE),
-        no_speech_prob=0.3,
+        settings=WhisperSTTServiceMLX.Settings(
+            model=MLXModel.LARGE_V3_TURBO_Q4,
+            language=Language(STT_LANGUAGE),
+            no_speech_prob=0.3,
+        ),
     )
 
     tts = PiperPlusTTSService()
@@ -120,11 +122,7 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool, sample_rate: in
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(_transport, _client):
-        logger.info("Client connected. Starting conversation...")
-        # Send a greeting message directly to TTS instead of LLMRunFrame
-        # This avoids the "No user query found in messages" error
-        greeting = "こんにちは。音声アシスタントです。何かお手伝いできますか？"
-        await worker.queue_frames([TextFrame(greeting)])
+        logger.info("Client connected. Waiting for user input...")
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(_transport, _client):

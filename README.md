@@ -155,17 +155,29 @@ This automatically:
 3. Restarts the Python server
 4. Prints the URLs and instructions
 
-### 5. Connect
+### 5. Stop the application
 
-#### For Video Mode:
-Open the printed URL in your browser and click **接続** (Connect).
+To stop the running components, use the following commands:
 
-#### For Voice Mode:
-1. Copy the **Vonage Voice API Webhook URL** printed by `start.sh`.
-2. Go to [Vonage Dashboard](https://dashboard.nexmo.com/) > Voice > Applications > Your App.
-3. Set the **Answer URL** to the copied URL and save.
-4. Call your Vonage phone number.
+#### Stop Python Server
+```bash
+# Find the PID and kill it
+ps aux | grep -E "python|uvicorn" | grep -v grep | awk '{print $2}' | xargs kill -9
+```
 
+#### Stop Cloudflare Tunnel
+```bash
+# Find the PID and kill it
+ps aux | grep cloudflared | grep -v grep | awk '{print $2}' | xargs kill -9
+```
+
+#### Stop All Processes (Quickest)
+```bash
+pkill -f server.py && pkill -f cloudflared
+```
+
+### 6. Connect
+...
 ## API Endpoints
 
 | Endpoint | Method | Description |

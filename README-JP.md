@@ -159,17 +159,29 @@ bash start.sh
 3. Python サーバーを再起動
 4. ブラウザ用 URL と Vonage 設定用の Webhook URL を表示
 
-### 5. 接続方法
+### 5. 停止方法
 
-#### ビデオモードの場合:
-表示された URL をブラウザで開き、「接続」をクリックしてください。
+実行中のコンポーネントを停止するには、以下のコマンドを使用します。
 
-#### 音声モード（電話）の場合:
-1. `start.sh` が表示する **Vonage Voice API Webhook URL** をコピーします。
-2. [Vonage ダッシュボード](https://dashboard.nexmo.com/) > Voice > Applications > 該当アプリ を開きます。
-3. **Answer URL** にコピーした URL を設定して保存します。
-4. あなたの Vonage 番号に電話をかけます。
+#### Python サーバーの停止
+```bash
+# PID を特定して終了させる
+ps aux | grep -E "python|uvicorn" | grep -v grep | awk '{print $2}' | xargs kill -9
+```
 
+#### Cloudflare Tunnel の停止
+```bash
+# PID を特定して終了させる
+ps aux | grep cloudflared | grep -v grep | awk '{print $2}' | xargs kill -9
+```
+
+#### すべてのプロセスを停止する (最も早い方法)
+```bash
+pkill -f server.py && pkill -f cloudflared
+```
+
+### 6. 接続方法
+...
 ## API エンドポイント
 
 | エンドポイント | メソッド | 説明 |
