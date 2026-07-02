@@ -35,6 +35,11 @@ class PiperPlusTTSService(TTSService):
         self._speed = speed
         self._half_tone = half_tone
 
+    def reset(self) -> None:
+        self._buffer = bytearray()
+        if hasattr(self, '_context_id'):
+            self._context_id = None
+
     async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
         from loguru import logger
         logger.debug(f"TTS received text: '{text}'")

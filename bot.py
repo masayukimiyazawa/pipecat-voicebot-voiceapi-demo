@@ -151,10 +151,36 @@ def get_tts():
     return _tts_instance
 
 
-async def run_bot(transport: BaseTransport, handle_sigint: bool, sample_rate: int):
+def _reset_service(service: object, name: str):
+    """Reset internal Pipecat state that persists across connections."""
+    service._cancelling = False
+    if hasattr(service, '_user_speaking'):
+        service._user_speaking = False
+    if hasattr(service, '_audio_buffer'):
+        service._audio_buffer.clear()
+    if hasattr(service, '_reconnect_audio_buffer'):
+        service._reconnect_audio_buffer.clear()
+    if hasattr(service, '_turn_context_id'):
+        service._turn_context_id = None
+    if hasattr(service, '_playing_context_id'):
+        service._playing_context_id = None
+    if hasattr(service, '_streamed_text'):
+        service._streamed_text = ""
+    if hasattr(service, '_sent_non_whitespace_in_context'):
+        service._sent_non_whitespace_in_context = False
+    if hasattr(service, '_processing_text'):
+        service._processing_text = False
+    logger.debug(f"Reset service: {name}")
+
+
+async def run_bot(transport: BaseTransport, handle_sigint: bool, sample_rate: int, websocket: WebSocket):
     llm = get_llm()
     stt = get_stt()
     tts = get_tts()
+
+    _reset_service(stt, "STT")
+    _reset_service(tts, "TTS")
+    _reset_service(llm, "LLM")
 
     context = LLMContext()
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
@@ -212,27 +238,11 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool, sample_rate: in
     await runner.run()
 
 
-async def bot(runner_args: WebSocketRunnerArguments):
+async def bot(runner_args: WebSocketRunnerArguments, transport: FastAPIWebsocketTransport):
     # Default to 16000 if not specified, but allow override from environment
     sample_rate = int(os.getenv("VONAGE_AUDIO_RATE", "16000"))
     
     logger.info(f"Starting bot with sample rate: {sample_rate}")
 
-    serializer = VonageFrameSerializer(
-        VonageFrameSerializer.InputParams(
-            vonage_sample_rate=sample_rate,
-        )
-    )
-
-    transport = FastAPIWebsocketTransport(
-        websocket=runner_args.websocket,
-        params=FastAPIWebsocketParams(
-            audio_in_enabled=True,
-            audio_out_enabled=True,
-            audio_out_10ms_chunks=2,
-            serializer=serializer,
-        ),
-    )
-
-    await run_bot(transport, runner_args.handle_sigint, sample_rate)
+    await run_bot(transport, runner_args.handle_sigint, sample_rate, runner_args.websocket)
 

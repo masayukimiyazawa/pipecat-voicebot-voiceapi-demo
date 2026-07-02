@@ -10,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
+from pipecat.serializers.vonage import VonageFrameSerializer
+from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
 from vonage import Auth, HttpClientOptions, Vonage
 from vonage_video import AudioConnectorOptions, TokenOptions
 
@@ -227,6 +229,25 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     logger.info("Client connected to /ws")
 
+    # 1. 接続ごとに「新しいトランスポート」を必ず作成する
+    # これにより、以前の接続の残骸（古いバッファや状態）の影響を防ぐ
+    sample_rate = int(os.getenv("VONAGE_AUDIO_RATE", "16000"))
+    serializer = VonageFrameSerializer(
+        VonageFrameSerializer.InputParams(
+            vonage_sample_rate=sample_rate,
+        )
+    )
+
+    transport = FastAPIWebsocketTransport(
+        websocket=websocket,
+        params=FastAPIWebsocketParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+            audio_out_10ms_chunks=2,
+            serializer=serializer,
+        ),
+    )
+
     async def keepalive():
         while True:
             try:
@@ -241,16 +262,18 @@ async def websocket_endpoint(websocket: WebSocket):
         from bot import bot
         from pipecat.runner.types import WebSocketRunnerArguments
 
+        # 2. 新しいトランスポートを渡してボットを起動
         runner_args = WebSocketRunnerArguments(websocket=websocket, body={})
-        await bot(runner_args)
+        # bot() 内部で transport を使うように bot.py も調整済み
+        await bot(runner_args, transport) 
+        
     except Exception as e:
         logger.exception(f"Pipecat bot error: {e}")
-        try:
-            await websocket.close()
-        except Exception:
-            pass
     finally:
+        # 3. 確実にクリーンアップ
         keepalive_task.cancel()
+        await transport.cleanup()
+        logger.info("WebSocket endpoint cleaned up")
 
 
 if __name__ == "__main__":
