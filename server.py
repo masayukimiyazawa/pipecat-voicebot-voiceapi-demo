@@ -14,6 +14,7 @@ from pipecat.serializers.vonage import VonageFrameSerializer
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
 from vonage import Auth, HttpClientOptions, Vonage
 from vonage_video import AudioConnectorOptions, TokenOptions
+from vonage_video.models.audio_connector import AudioConnectorData
 
 load_dotenv(override=True)
 
@@ -58,9 +59,43 @@ async def _create_session_async(vng: Vonage) -> str:
     return session_id
 
 
+_active_connectors: dict[str, AudioConnectorData] = {}
+
+
+def _get_video_client() -> Vonage:
+    application_id = _require_env("VONAGE_APPLICATION_ID")
+    private_key_raw = _require_env("VONAGE_PRIVATE_KEY")
+    private_key = _read_private_key(private_key_raw)
+    return _create_vonage_client(application_id, private_key)
+
+
+async def _stop_audio_connector_async(session_id: str) -> None:
+    vng = _get_video_client()
+    connector = _active_connectors.pop(session_id, None)
+    if connector is None:
+        logger.info(f"No active connector found for session {session_id}")
+        return
+    try:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: vng._http_client.delete(
+                vng._http_client.video_host,
+                f"/v2/project/{vng._http_client.auth.application_id}/connect?sessionId={session_id}",
+            ),
+        )
+        logger.info(f"Stopped Audio Connector for session {session_id}")
+    except Exception as e:
+        logger.warning(f"Failed to stop Audio Connector for session {session_id}: {e}")
+
+
 async def _connect_audio_connector_async(
     vng: Vonage, session_id: str, ws_uri: str, audio_rate: int
 ) -> None:
+    # Stop ALL previous connectors (they leak if only the new session_id is used)
+    for old_sid in list(_active_connectors.keys()):
+        await _stop_audio_connector_async(old_sid)
+
     logger.info(
         f"Connecting Vonage Audio Connector: session={session_id}, ws={ws_uri}, rate={audio_rate}"
     )
@@ -76,10 +111,11 @@ async def _connect_audio_connector_async(
     )
 
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(
+    connector = await loop.run_in_executor(
         None, lambda: vng.video.start_audio_connector(audio_opts)
     )
-    logger.info("Audio Connector started successfully")
+    _active_connectors[session_id] = connector
+    logger.info(f"Audio Connector started successfully: id={connector.id}")
 
 
 @asynccontextmanager

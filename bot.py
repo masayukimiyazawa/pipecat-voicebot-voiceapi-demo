@@ -11,6 +11,7 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.frames.frames import Frame, InputAudioRawFrame, TextFrame
 from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMAssistantAggregator,
@@ -73,7 +74,7 @@ async def preload_models():
             system_instruction=(
                 "あなたは音声アシスタントです。"
                 "応答はテキスト読み上げで読まれるため、簡潔で会話調にしてください。"
-                "日本語と英語の両方に対応できます。"
+                "アルファベットの読み上げ（例: A, B, C）や英会話は行わず、常に日本語で応答してください。"
                 "記号やマークダウンは避けてください。"
             ),
         ),
@@ -170,6 +171,60 @@ def _reset_service(service: object, name: str):
         service._sent_non_whitespace_in_context = False
     if hasattr(service, '_processing_text'):
         service._processing_text = False
+    if hasattr(service, '_content'):
+        service._content = None
+    if hasattr(service, '_wave'):
+        service._wave = None
+    # STT-specific stale state
+    if hasattr(service, '_finalize_pending'):
+        service._finalize_pending = False
+    if hasattr(service, '_finalize_requested'):
+        service._finalize_requested = False
+    if hasattr(service, '_last_transcript_time'):
+        service._last_transcript_time = 0
+    if hasattr(service, '_last_audio_time'):
+        service._last_audio_time = 0
+    if hasattr(service, '_can_reconnect'):
+        service._can_reconnect = True
+    if hasattr(service, '_need_reconnect'):
+        service._need_reconnect = False
+    if hasattr(service, '_reconnecting'):
+        service._reconnecting = False
+    if hasattr(service, '_muted'):
+        service._muted = False
+    # Cancel dangling TTFB timeout task
+    if hasattr(service, '_ttfb_timeout_task') and service._ttfb_timeout_task:
+        service._ttfb_timeout_task.cancel()
+        service._ttfb_timeout_task = None
+    # LLM-specific accumulated state
+    if hasattr(service, '_appended_system_instructions'):
+        service._appended_system_instructions.clear()
+    if hasattr(service, '_functions'):
+        service._functions.clear()
+    if hasattr(service, '_redundant_registration_warned'):
+        service._redundant_registration_warned.clear()
+    if hasattr(service, '_explicitly_unregistered_function_names'):
+        service._explicitly_unregistered_function_names.clear()
+    if hasattr(service, '_skip_tts'):
+        service._skip_tts = None
+    if hasattr(service, '_filter_incomplete_user_turns'):
+        service._filter_incomplete_user_turns = False
+    if hasattr(service, '_async_tool_cancellation_enabled'):
+        service._async_tool_cancellation_enabled = False
+    # Cancel pending function call tasks
+    if hasattr(service, '_function_call_tasks') and service._function_call_tasks:
+        for task in list(service._function_call_tasks.keys()):
+            if task and not task.done():
+                task.cancel()
+        service._function_call_tasks.clear()
+    if hasattr(service, '_sequential_runner_task') and service._sequential_runner_task:
+        if not service._sequential_runner_task.done():
+            service._sequential_runner_task.cancel()
+        service._sequential_runner_task = None
+    if hasattr(service, '_summary_task') and service._summary_task:
+        if not service._summary_task.done():
+            service._summary_task.cancel()
+        service._summary_task = None
     logger.debug(f"Reset service: {name}")
 
 
@@ -183,28 +238,35 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool, sample_rate: in
     _reset_service(llm, "LLM")
 
     context = LLMContext()
+    # Ensure context starts completely empty (LLMContext() already does this,
+    # but be explicit to prevent any residual messages from carrying over)
+    context._messages.clear()
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
-            vad_analyzer=SileroVADAnalyzer(
-                params=VADParams(
-                    confidence=0.5,
-                    start_secs=0.2,
-                    stop_secs=0.2,
-                    min_volume=0.0,
-                ),
-            ),
-            audio_idle_timeout=1.0,
             user_turn_stop_timeout=5.0,
         ),
     )
 
     audio_logger = AudioFrameLogger()
 
+    vad_processor = VADProcessor(
+        vad_analyzer=SileroVADAnalyzer(
+            params=VADParams(
+                confidence=0.5,
+                start_secs=0.2,
+                stop_secs=0.2,
+                min_volume=0.0,
+            ),
+        ),
+        audio_idle_timeout=1.0,
+    )
+
     pipeline = Pipeline(
         [
             transport.input(),
             audio_logger,
+            vad_processor,
             stt,
             user_aggregator,
             llm,
@@ -233,9 +295,29 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool, sample_rate: in
         logger.info("Client disconnected. Ending session.")
         await worker.cancel()
 
+    async def _send_immediate_greeting():
+        await asyncio.sleep(0)
+        logger.info("Sending greeting...")
+        await assistant_aggregator.push_frame(
+            TextFrame("こんにちは、私はAIエージェントです。どんな話題でもお付き合いします。今日はどんなお話をしましょうか？"),
+            FrameDirection.DOWNSTREAM,
+        )
+
+    async def _send_delayed_greeting():
+        await asyncio.sleep(3)
+        logger.info("Sending delayed greeting...")
+        await assistant_aggregator.push_frame(
+            TextFrame("こんにちは、私はAIエージェントです。どんな話題でもお付き合いします。今日はどんなお話をしましょうか？"),
+            FrameDirection.DOWNSTREAM,
+        )
+
     runner = WorkerRunner(handle_sigint=handle_sigint)
     await runner.add_workers(worker)
+    immediate_task = asyncio.create_task(_send_immediate_greeting())
+    delayed_task = asyncio.create_task(_send_delayed_greeting())
     await runner.run()
+    immediate_task.cancel()
+    delayed_task.cancel()
 
 
 async def bot(runner_args: WebSocketRunnerArguments, transport: FastAPIWebsocketTransport):
