@@ -234,6 +234,10 @@ pkill -f server.py && pkill -f cloudflared
 
 ボットはクライアント接続時に TTS エンジンを介してテキストの挨拶を送信します。ウェイクワードは不要です。
 
+## デモ動画
+
+https://youtu.be/FCTDWOr8h58?si=cM32JVRFJ_E2QgmO
+
 ## 注意事項
 
 - Cloudflare Tunnel（`trycloudflare.com`）は稼働保証なしのクイックトンネルです。本番運用時は名前付きトンネル＋独自ドメインを推奨します。

@@ -229,3 +229,7 @@ pkill -f server.py && pkill -f cloudflared
 ## Sequencing
 
 The bot initiates conversation on client connection by sending a text greeting via the TTS engine. No wake word required.
+
+## Demo Video Clip (Japanese)
+
+https://youtu.be/FCTDWOr8h58?si=cM32JVRFJ_E2QgmO
